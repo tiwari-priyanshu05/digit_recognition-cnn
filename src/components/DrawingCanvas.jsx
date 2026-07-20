@@ -137,20 +137,19 @@ const DrawingCanvas = ({ onDraw, onClear }) => {
     const ctx = canvas.getContext('2d');
     const pCtx = previewCanvas.getContext('2d');
 
-    // Create temporary image from canvas
-    const tempCanvas = document.createElement('canvas');
-    tempCanvas.width = 28;
-    tempCanvas.height = 28;
-    const tCtx = tempCanvas.getContext('2d');
-
-    // Draw the main canvas contents resized to 28x28
-    // To mimic MNIST better, we compute the bounding box of the drawn digit and center it with padding
-    const bounds = getDigitBoundingBox(canvas);
+    // Find bounding box and Center of Mass
+    const bounds = getDigitCenterOfMass(canvas);
     if (!bounds) {
       // Nothing drawn yet
       onClear();
       return;
     }
+
+    // Create temporary image from canvas
+    const tempCanvas = document.createElement('canvas');
+    tempCanvas.width = 28;
+    tempCanvas.height = 28;
+    const tCtx = tempCanvas.getContext('2d');
 
     tCtx.fillStyle = '#000000';
     tCtx.fillRect(0, 0, 28, 28);
@@ -165,50 +164,77 @@ const DrawingCanvas = ({ onDraw, onClear }) => {
     const drawW = digitW * scale;
     const drawH = digitH * scale;
     
-    const dx = (28 - drawW) / 2;
-    const dy = (28 - drawH) / 2;
+    // Align using Center of Mass: Center of Mass should end up at (14, 14)
+    const dx = 14 - (bounds.comX - bounds.minX) * scale;
+    const dy = 14 - (bounds.comY - bounds.minY) * scale;
 
-    // Draw bounding box contents scaled and centered
+    // Draw bounding box contents scaled and centered by Center of Mass
     tCtx.drawImage(
       canvas,
       bounds.minX, bounds.minY, digitW, digitH, // Source
       dx, dy, drawW, drawH                     // Destination
     );
 
-    // Update the visual 28x28 preview canvas
-    pCtx.drawImage(tempCanvas, 0, 0, previewCanvas.width, previewCanvas.height);
-
     // Get 28x28 pixel data
     const imgData = tCtx.getImageData(0, 0, 28, 28);
     const data = imgData.data;
 
     // Convert RGBA to 28x28 flat array [0, 1]
-    const pixels = new Float32Array(28 * 28);
+    let pixels = new Float32Array(28 * 28);
     for (let i = 0; i < 28 * 28; i++) {
-      // Since it's white on black, we can take red, green, or blue channel (all equal)
       pixels[i] = data[i * 4] / 255.0;
     }
+
+    // Apply a soft blur to mimic the anti-aliased MNIST dataset format
+    pixels = applySoftBlur(pixels);
+
+    // Render the blurred image to the visual 28x28 preview canvas
+    const previewImgData = pCtx.createImageData(28, 28);
+    const pData = previewImgData.data;
+    for (let i = 0; i < 28 * 28; i++) {
+      const val = Math.min(255, Math.max(0, pixels[i] * 255));
+      pData[i * 4] = val;
+      pData[i * 4 + 1] = val;
+      pData[i * 4 + 2] = val;
+      pData[i * 4 + 3] = 255;
+    }
+    
+    // Draw the 28x28 image onto the 140x140 visual preview canvas using a temporary canvas
+    const tempCanvasBlurred = document.createElement('canvas');
+    tempCanvasBlurred.width = 28;
+    tempCanvasBlurred.height = 28;
+    const tbCtx = tempCanvasBlurred.getContext('2d');
+    tbCtx.putImageData(previewImgData, 0, 0);
+
+    pCtx.fillStyle = '#000000';
+    pCtx.fillRect(0, 0, previewCanvas.width, previewCanvas.height);
+    pCtx.drawImage(tempCanvasBlurred, 0, 0, previewCanvas.width, previewCanvas.height);
 
     onDraw(pixels);
   };
 
-  // Helper to find the bounding box of the drawn digit (non-black pixels)
-  const getDigitBoundingBox = (canvas) => {
+  // Helper to calculate both bounding box and Center of Mass (Centroid)
+  const getDigitCenterOfMass = (canvas) => {
     const ctx = canvas.getContext('2d');
     const width = canvas.width;
     const height = canvas.height;
     const imgData = ctx.getImageData(0, 0, width, height);
     const data = imgData.data;
 
+    let sumX = 0, sumY = 0, totalWeight = 0;
     let minX = width, minY = height, maxX = -1, maxY = -1;
     let hasPixels = false;
 
     for (let y = 0; y < height; y++) {
       for (let x = 0; x < width; x++) {
         const idx = (y * width + x) * 4;
-        // Check if pixel red value is above threshold (non-black)
-        if (data[idx] > 20) {
+        const val = data[idx]; // Red channel of white stroke
+        if (val > 15) {
           hasPixels = true;
+          sumX += x * val;
+          sumY += y * val;
+          totalWeight += val;
+          
           if (x < minX) minX = x;
           if (x > maxX) maxX = x;
           if (y < minY) minY = y;
@@ -217,7 +243,7 @@ const DrawingCanvas = ({ onDraw, onClear }) => {
       }
     }
 
-    if (!hasPixels) return null;
+    if (!hasPixels || totalWeight === 0) return null;
 
     // Add some padding to bounding box
     const padding = 10;
@@ -226,7 +252,49 @@ const DrawingCanvas = ({ onDraw, onClear }) => {
     maxX = Math.min(width - 1, maxX + padding);
     maxY = Math.min(height - 1, maxY + padding);
 
-    return { minX, minY, maxX, maxY };
+    return {
+      comX: sumX / totalWeight,
+      comY: sumY / totalWeight,
+      minX, minY, maxX, maxY
+    };
+  };
+
+  // 3x3 soft box blur to match MNIST's anti-aliased image characteristics
+  const applySoftBlur = (pixels) => {
+    const blurred = new Float32Array(28 * 28);
+    const kernel = [
+      1/16, 2/16, 1/16,
+      2/16, 4/16, 2/16,
+      1/16, 2/16, 1/16
+    ];
+
+    for (let y = 0; y < 28; y++) {
+      for (let x = 0; x < 28; x++) {
+        let sum = 0;
+        let weightSum = 0;
+        
+        for (let ky = -1; ky <= 1; ky++) {
+          for (let kx = -1; kx <= 1; kx++) {
+            const ny = y + ky;
+            const nx = x + kx;
+            if (ny >= 0 && ny < 28 && nx >= 0 && nx < 28) {
+              const pixelVal = pixels[ny * 28 + nx];
+              const weight = kernel[(ky + 1) * 3 + (kx + 1)];
+              sum += pixelVal * weight;
+              weightSum += weight;
+            }
+          }
+        }
+        
+        let blurredVal = sum / weightSum;
+        // Increase contrast slightly on blurred values to maintain brightness
+        if (blurredVal > 0.05) {
+          blurredVal = Math.min(1.0, blurredVal * 1.15);
+        }
+        blurred[y * 28 + x] = blurredVal;
+      }
+    }
+    return blurred;
   };
 
   return (

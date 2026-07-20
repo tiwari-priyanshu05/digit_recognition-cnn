@@ -1,3 +1,5 @@
+import * as tf from '@tensorflow/tfjs';
+
 // MNIST Dataset Loader Helper for TensorFlow.js
 // Adapted from official TFJS MNIST examples.
 
