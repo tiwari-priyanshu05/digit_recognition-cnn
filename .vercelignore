@@ -1,0 +1,7 @@
+# Ignore Python files to prevent Vercel from attempting to install Python dependencies
+requirements.txt
+app (2).py
+cnn_app.py
+inspect_h5.py
+export_weights.py
+venv/
